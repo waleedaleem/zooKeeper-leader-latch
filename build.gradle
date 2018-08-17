@@ -1,0 +1,21 @@
+apply plugin: 'application'
+
+group 'com.walid.curator'
+version '1.0-SNAPSHOT'
+
+mainClassName = 'com.walid.curator.LeaderLatchApp'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile([group: 'org.apache.curator', name: 'curator-framework', version: '2.12.0'],
+            [group: 'org.apache.curator', name: 'curator-recipes', version: '2.12.0'],
+            [group: 'org.slf4j', name:'slf4j-api', version: '1.7.5'],
+            [group: 'ch.qos.logback', name: 'logback-classic', version: '1.0.13']
+    )
+    testCompile group: 'junit', name: 'junit', version: '4.12'
+}
