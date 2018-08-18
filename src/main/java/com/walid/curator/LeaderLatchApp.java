@@ -1,83 +1,78 @@
 package com.walid.curator;
 
-import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.framework.recipes.leader.LeaderLatch;
+import org.apache.curator.framework.api.CuratorEvent;
+import org.apache.curator.framework.api.CuratorListener;
 import org.apache.curator.retry.ExponentialBackoffRetry;
-import org.apache.curator.utils.CloseableUtils;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.stream.IntStream;
 
-public class LeaderLatchApp {
+public class LeaderLatchApp implements CuratorListener {
 
-    private static final int CLIENT_QTY = 10;
-    private static final String PATH = "/LeaderLatchApp";
+    static final String PATH = "/LeaderLatchClient";
+    private static final Logger logger = LoggerFactory.getLogger(LeaderLatchApp.class);
     private static final String ZK_CONN_STRING = "127.0.0.1:2181";
-    private static final List<CuratorFramework> CLIENTS = Lists.newArrayList();
-    private static final List<LeaderLatch> LATCHES = Lists.newArrayList();
+    private static final int NUMBER_OF_CLIENTS = 10;
+    // One shared curator framework (thread safe already)
+    private static final CuratorFramework CURATOR_FRAMEWORK = CuratorFrameworkFactory.newClient(
+            ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
+    private static final ExecutorService executorService = Executors.newFixedThreadPool(NUMBER_OF_CLIENTS,
+            new ThreadFactoryBuilder().setNameFormat("LeaderLatchClient-%d").build());
 
-    public static void main(String[] args) {
-        try {
-            for (int i = 0; i < CLIENT_QTY; ++i) {
-                CuratorFramework client = CuratorFrameworkFactory.newClient(
-                        ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
-                CLIENTS.add(client);
-                LeaderLatch latch = new LeaderLatch(client, PATH, "Client #" + i);
-                LATCHES.add(latch);
-                client.start();
-                // clean up PATH (if already exists)
-                if (i == 0) client.delete().guaranteed().deletingChildrenIfNeeded().forPath(PATH);
-                latch.start();
-            }
+    public static void main(String[] args) throws Exception {
+        CURATOR_FRAMEWORK.getCuratorListenable().addListener(new LeaderLatchApp());
+        CURATOR_FRAMEWORK.start();
+        resetZKPath();
+        printLatchNodes();
+        IntStream.range(0, NUMBER_OF_CLIENTS)
+                .mapToObj(i -> "Client #" + i)
+                .forEach(id -> executorService.submit(new LeaderLatchClient(CURATOR_FRAMEWORK, id)));
+    }
 
-            // allow latches to create their latch nodes
-            Thread.sleep(20000);
+    private static void resetZKPath() throws Exception {
+        // clean up PATH (if already exists)
+        if (CURATOR_FRAMEWORK.checkExists().forPath(PATH) != null) {
+            CURATOR_FRAMEWORK.delete().deletingChildrenIfNeeded().forPath(PATH);
+        }
+        CURATOR_FRAMEWORK.create().forPath(PATH);
+    }
 
-            printLatchNodes(CLIENTS);
-
-            LeaderLatch currentLeader = null;
-            for (int i = 0; i < CLIENT_QTY; ++i) {
-                LeaderLatch latch = LATCHES.get(i);
-                if (latch.hasLeadership()) {
-                    currentLeader = latch;
-                    System.out.println("current leader is " + currentLeader.getId());
+    private static void printLatchNodes() throws Exception {
+        final List<String> latches = CURATOR_FRAMEWORK.getChildren().watched().forPath(PATH);
+        System.out.printf("%n%s children:%n", PATH);
+        if (latches.isEmpty()) {
+            System.out.println("\tNone");
+        } else {
+            latches.forEach(s -> {
+                try {
+                    System.out.printf("\t%s contains [%s]%n", s, new String(CURATOR_FRAMEWORK.getData().forPath(PATH + "/" + s)));
+                } catch (Exception ex) {
+                    logger.error("Error:", ex);
                 }
-            }
-
-            System.out.println("release the leader " + currentLeader.getId());
-            currentLeader.close();
-            LATCHES.get(0).await(2, TimeUnit.SECONDS);
-            System.out.println("the new leader is " + LATCHES.get(0).getLeader().getId());
-            System.out.println("Participants: " + LATCHES.get(0).getParticipants());
-            System.out.println("Press enter/return to quit\n");
-            new BufferedReader(new InputStreamReader(System.in)).readLine();
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            closeAllQuietly();
+            });
         }
     }
 
-    private static void printLatchNodes(List<CuratorFramework> clients) throws Exception {
-        clients.get(0).getChildren().forPath(PATH).forEach(s -> {
-            try {
-                System.out.println(s + " contains [" + new String(clients.get(0).getData().forPath(PATH + "/" + s)) + "]");
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        });
-    }
+    @Override
+    public void eventReceived(CuratorFramework client, CuratorEvent event) throws Exception {
+        logger.debug("event = [" + event + "]");
+        String eventPath = event.getPath();
+        WatchedEvent watchedEvent = event.getWatchedEvent();
+        if (eventPath == null || watchedEvent == null) {
+            return;
+        }
 
-    private static void closeAllQuietly() {
-        System.out.println("Shutting down...");
-        LATCHES.stream()
-                .filter(l -> l.getState().equals(LeaderLatch.State.STARTED))
-                .forEach(CloseableUtils::closeQuietly);
-        CLIENTS.stream()
-                .forEach(CloseableUtils::closeQuietly);
+        if (PATH.equals(eventPath) && watchedEvent.getType().equals(Watcher.Event.EventType.NodeChildrenChanged)) {
+            printLatchNodes();
+        }
     }
 }
