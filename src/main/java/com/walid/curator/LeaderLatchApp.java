@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class LeaderLatchApp implements CuratorListener {
@@ -48,23 +49,27 @@ public class LeaderLatchApp implements CuratorListener {
 
     private static void printLatchNodes() throws Exception {
         final List<String> latches = CURATOR_FRAMEWORK.getChildren().watched().forPath(PATH);
-        System.out.printf("%n%s children:%n", PATH);
         if (latches.isEmpty()) {
-            System.out.println("\tNone");
+            logger.debug("{} has no children", PATH);
         } else {
-            latches.forEach(s -> {
-                try {
-                    System.out.printf("\t%s contains [%s]%n", s, new String(CURATOR_FRAMEWORK.getData().forPath(PATH + "/" + s)));
-                } catch (Exception ex) {
-                    logger.error("Error:", ex);
-                }
-            });
+            logger.debug("{} children are: \n{}", PATH,
+                    latches.stream()
+                            .map(l -> {
+                                try {
+                                    return String.format("\t%s contains [%s]", l, new String(CURATOR_FRAMEWORK.getData().forPath(PATH + "/" + l)));
+                                } catch (Exception ex) {
+                                    logger.error("Error:", ex);
+                                    return null;
+                                }
+                            })
+                            .collect(Collectors.joining("\n"))
+            );
         }
     }
 
     @Override
     public void eventReceived(CuratorFramework client, CuratorEvent event) throws Exception {
-        logger.debug("event = [" + event + "]");
+        logger.debug("event = [{}]", event);
         String eventPath = event.getPath();
         WatchedEvent watchedEvent = event.getWatchedEvent();
         if (eventPath == null || watchedEvent == null) {
